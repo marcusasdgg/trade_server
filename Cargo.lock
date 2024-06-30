@@ -75,6 +75,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d231dfb89cfffdbc30e7fc41579ed6066ad03abda9e567ccafae602b97ec5024"
 
 [[package]]
+name = "if-addrs"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fc8e9b9a293a79d8206f1aad35c6bb9adadf19c916f4f3545ba77406fd4cab52"
+dependencies = [
+ "libc",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.155"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -273,6 +283,7 @@ dependencies = [
 name = "trade_server"
 version = "0.1.0"
 dependencies = [
+ "if-addrs",
  "tokio",
 ]
 

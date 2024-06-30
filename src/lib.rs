@@ -3,7 +3,9 @@ use tokio::{net, sync::broadcast};
 use tokio::spawn;
 use tokio::time::Duration;
 use std::net::ToSocketAddrs;
-
+use if_addrs::get_if_addrs;
+use std::io::{self, Write};
+use std::net::{TcpListener, TcpStream};
 
 
 struct Client {
@@ -24,28 +26,56 @@ impl Dominator {
     {
         println!("starting server up!");
         //initialize dominator fields,
-        let clients: Vec<Client> = Vec::new();
+        let clients = Vec::new();
 
         // find current local IP address
         let server_address = String::from("192.168.0.1");
-        let client_host_port = 1;
         let broadcast_address = "239.255.255.250:1901".to_string();
         let argument2 = broadcast_address.clone();
 
+        let mut broadcast_address : Option<String> = None;
+        for iface in if_addrs::get_if_addrs().unwrap() {
+           if iface.addr.ip().to_string().contains("192.168.0."){
+            broadcast_address = Some(iface.addr.ip().clone().to_string());
+           }
+        }
+        
+        if  broadcast_address.is_none() {
+            println!("broadcast address was not found to have typical address pattern, \nlook into IP address configuration and enter your PC's local IP\n Enter here: ");
+            let mut temp = String::new();
+            std::io::stdin().read_line(&mut temp).unwrap();
+            broadcast_address = Some(temp);
+        }   
+
+        let broadcast_address = broadcast_address.unwrap();
+
+        let mut counter = 49153;
+        while if_port_available(broadcast_address.clone(), counter) {
+            counter += 1;
+        }
+
+        let client_host_port = counter;
+        
+        let broadcast_message = broadcast_address.clone();
+
         tokio::spawn(async move {
-            Dominator::start_broadcast("192.168.0.1".to_string(), argument2).await;
+            Dominator::start_broadcast(format!("TS {}:{}",broadcast_message, client_host_port), argument2).await;
         });
 
-       Dominator {clients, server_address, client_host_port, broadcast_address}
+        // now initializing all values has been done we can start the process of device assigning.
+        let mut new = Dominator {clients, server_address, client_host_port, broadcast_address};
+        new.connection_handler( client_host_port);
+        return new;
     }
 
     //function that setups up a handler loop that accepts incoming connections then diverts them to
     //another assigned port by sending them the new IP address?.
-    async fn connectionHandler() -> String{
-
-
-        "a".to_string()
+    fn connection_handler(& mut self, port: i32) {
+        TcpListener::bind(format!("{}:{}", self.broadcast_address , port)).unwrap();
+        
     }
+
+    
 
     async fn start_broadcast(message: String, broadcast_address: String){
         println!("starting broadcasting!");
@@ -63,4 +93,9 @@ impl Dominator {
     }
 
 
+}
+
+
+fn if_port_available(address : String, port: i32) -> bool {
+    TcpListener::bind(format!("{}:{}", address, port)).is_err()
 }
