@@ -1,32 +1,33 @@
-use std::{net::{SocketAddr, UdpSocket}, option};
+use std::{net::{SocketAddr, UdpSocket}, option, sync::{Arc, Mutex}};
 use tokio::{net, sync::broadcast};
 use tokio::spawn;
 use tokio::time::Duration;
-use std::net::ToSocketAddrs;
 use if_addrs::get_if_addrs;
-use std::io::{self, Write};
-use std::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream};
+use tokio_native_tls::TlsAcceptor;
+use tokio_tungstenite::accept_async;
+use tokio_tungstenite::tungstenite::protocol::Message;
+use native_tls::{Identity, TlsAcceptor as NativeTlsAcceptor};
+use futures_util::{StreamExt, SinkExt};
 
+mod client;
+mod authentication;
+use client::Client;
 
-struct Client {
-    //some field of websocket connection client.
-    //authentication methods blah blah blah
-    // tokens
-    port: i8,
-}
 pub struct Dominator {
-    clients: Vec<Client>,
+    clients: Arc<Mutex<Vec<Client>>>,
     server_address: String,
     client_host_port: i32,
     broadcast_address: String,
+    //atomic bool for shutdown sequence.
 }   
 
 impl Dominator {
-    pub async fn new() -> Self //no checking for shitty address rn.
+    pub async fn new() -> Arc<Self> //no checking for shitty address rn.
     {
         println!("starting server up!");
         //initialize dominator fields,
-        let clients = Vec::new();
+        let clients = Arc::new(Mutex::new(Vec::new()));
 
         // find current local IP address
         let server_address = String::from("192.168.0.1");
@@ -50,7 +51,7 @@ impl Dominator {
         let broadcast_address = broadcast_address.unwrap();
 
         let mut counter = 49153;
-        while if_port_available(broadcast_address.clone(), counter) {
+        while if_port_available(broadcast_address.clone(), counter).await {
             counter += 1;
         }
 
@@ -63,22 +64,55 @@ impl Dominator {
         });
 
         // now initializing all values has been done we can start the process of device assigning.
-        let mut new = Dominator {clients, server_address, client_host_port, broadcast_address};
-        new.connection_handler( client_host_port);
+        let new = Arc::new(Dominator {clients, server_address, client_host_port, broadcast_address});
+        
+        let handler_new = new.clone();
+        tokio::spawn(async move {
+           handler_new.connection_handler(client_host_port).await;
+        });
+
         return new;
     }
 
     //function that setups up a handler loop that accepts incoming connections then diverts them to
     //another assigned port by sending them the new IP address?.
-    fn connection_handler(& mut self, port: i32) {
-        TcpListener::bind(format!("{}:{}", self.broadcast_address , port)).unwrap();
+    async fn connection_handler(self: Arc<Self>, port: i32) {
+        // bind to broadcast address and port. we then establish
+        let listener = TcpListener::bind(format!("{}:{}", self.broadcast_address , port)).await.unwrap();
+        let identity = load_tls_identity().expect("Failed to load TLS identity");
         
+        let acceptor = TlsAcceptor::from(identity);
+        //initate websocket oonnection
+        while let Ok((stream, _)) = listener.accept().await {
+            println!("found connection");
+            let acceptor = acceptor.clone();
+            let this = self.clone();
+            tokio::spawn(async move {
+                let tls_stream = acceptor.accept(stream).await.unwrap();
+                this.handle_connection(tls_stream).await;
+            });
+        }
+        println!("oh shit");
+    }
+
+    
+    async fn handle_connection(&self,  stream: tokio_native_tls::TlsStream<tokio::net::TcpStream>){
+        let peer_addr = stream.get_ref().get_ref().get_ref().peer_addr().unwrap();
+    
+        println!("address of client is {}", peer_addr);
+    
+        let ws_stream = accept_async(stream).await.expect("Error during WebSocket handshake");
+        println!("websocket found");
+        let (mut ws_sender, mut ws_receiver) = ws_stream.split();
+        while let Some(msg) = ws_receiver.next().await {
+            println!("{}", msg.unwrap().to_text().unwrap())
+            // we authenticate this dude first then hand it off to client.
+        }
     }
 
     
 
     async fn start_broadcast(message: String, broadcast_address: String){
-        println!("starting broadcasting!");
 
         let socket = UdpSocket::bind("0.0.0.0:0").expect("Couldn't bind to address");
         socket.set_multicast_loop_v4(true).expect("Couldn't set multicast loop");
@@ -96,6 +130,14 @@ impl Dominator {
 }
 
 
-fn if_port_available(address : String, port: i32) -> bool {
-    TcpListener::bind(format!("{}:{}", address, port)).is_err()
+async fn if_port_available(address : String, port: i32) -> bool {
+    TcpListener::bind(format!("{}:{}", address, port)).await.is_err()
 }
+
+fn load_tls_identity() -> Result<NativeTlsAcceptor, Box<dyn std::error::Error>> {
+    // Load the identity from a PKCS#12 archive
+    let cert = include_bytes!("identity.pfx");
+    let identity = Identity::from_pkcs12(cert, "Yahooconnect!1")?;
+    Ok(NativeTlsAcceptor::builder(identity).build()?)
+}
+

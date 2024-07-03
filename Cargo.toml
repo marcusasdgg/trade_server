@@ -8,3 +8,8 @@ edition = "2021"
 [dependencies]
 tokio = { version = "*", features = ["full"] }
 if-addrs = "*"
+tokio-tungstenite = "0.15"
+tokio-native-tls = "0.3"
+futures-util = "0.3"
+native-tls = "0.2"
+rand = "*"
