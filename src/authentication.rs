@@ -14,6 +14,9 @@ use lettre::{Message as mailMessage, SmtpTransport, Transport};
 use chrono::{Date, DateTime, Days, Utc};
 use tokio::sync::Mutex;
 
+use serde::Deserialize;
+use serde_json::{Result, Value};
+
 const TOKENLENGTH : i32 = 10;
 
 #[derive(Eq, Hash, PartialEq, Clone)]
@@ -63,7 +66,7 @@ impl Authenticate {
     /*
     * registers user and returns a token valid for 24 hours.
     */
-    pub async fn register_user(&self, full_name: String, password: String, email: String, ws_sender: &mut SplitSink<WebSocketStream<TlsStream<TcpStream>>, Message>, ws_receiver: &mut SplitStream<WebSocketStream<TlsStream<TcpStream>>>) -> Result<(),String> {
+    pub async fn register_user(&self, full_name: String, password: String, email: String, ws_sender: &mut SplitSink<WebSocketStream<TlsStream<TcpStream>>, Message>, ws_receiver: &mut SplitStream<WebSocketStream<TlsStream<TcpStream>>>) -> std::result::Result<(),String> {
         //password checks
         let digit_regex = Regex::new(r"\d").unwrap();
         let uppercase_regex = Regex::new(r"[A-Z]").unwrap();
@@ -78,8 +81,9 @@ impl Authenticate {
 
         let verification_code = rand::thread_rng().gen_range(0..999999);
 
+
         let mail = mailMessage::builder()
-            .from(self.server_username.clone().parse().unwrap())
+            .from(format!("Trade Server <{}>",self.server_username.trim()).parse().unwrap())
             .to(email.parse().unwrap())
             .subject("Authentication Code For Trade Server")
             .header(ContentType::TEXT_PLAIN)
@@ -94,9 +98,11 @@ impl Authenticate {
             if tries == 6 {
                 return Err("too many incorrect email verification tries".to_string());
             }
-            let mut response = msg.unwrap().to_string();
-            if response.contains("{auth: ") {
-                if response.split_off(6).strip_suffix("}").unwrap().parse::<i32>().unwrap() == verification_code {
+            let response = msg.unwrap().to_string();
+            if response.contains("auth") {
+                let response : Value = serde_json::from_str(&response).unwrap();
+                let given_code = response.get("auth").unwrap().as_i64().unwrap();
+                if  given_code == verification_code {
                     break;
                 } else {
                     ws_sender.send(Message::text("{request: bad_veri_code}")).await.unwrap();
@@ -122,7 +128,7 @@ impl Authenticate {
     /*
     * logs in user and returns a token valid for 24 hours.
     */
-    pub fn login_user() -> Result<String,String> {
+    pub fn login_user() -> std::result::Result<String,String> {
         Ok("hash".to_string())
     }
 
