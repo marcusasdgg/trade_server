@@ -1,4 +1,5 @@
 use std::{net::{SocketAddr, UdpSocket}, option, sync::{Arc, Mutex}};
+use authentication::Authenticate;
 use tokio::{net, sync::broadcast};
 use tokio::spawn;
 use tokio::time::Duration;
@@ -10,6 +11,10 @@ use tokio_tungstenite::tungstenite::protocol::Message;
 use native_tls::{Identity, TlsAcceptor as NativeTlsAcceptor};
 use futures_util::{StreamExt, SinkExt};
 
+
+use serde::Deserialize;
+use serde_json::{Result, Value};
+
 mod client;
 mod authentication;
 use client::Client;
@@ -19,6 +24,7 @@ pub struct Dominator {
     server_address: String,
     client_host_port: i32,
     broadcast_address: String,
+    authenticator: Arc<Authenticate>
     //atomic bool for shutdown sequence.
 }   
 
@@ -64,7 +70,7 @@ impl Dominator {
         });
 
         // now initializing all values has been done we can start the process of device assigning.
-        let new = Arc::new(Dominator {clients, server_address, client_host_port, broadcast_address});
+        let new = Arc::new(Dominator {clients, server_address, client_host_port, broadcast_address, authenticator: Authenticate::new()});
         
         let handler_new = new.clone();
         tokio::spawn(async move {
@@ -105,7 +111,18 @@ impl Dominator {
         println!("websocket found");
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         while let Some(msg) = ws_receiver.next().await {
-            println!("{}", msg.unwrap().to_text().unwrap())
+            let msg = msg.unwrap().into_text().unwrap();
+            if msg.contains("register"){
+                println!("user trying to register");
+                let d: Value = serde_json::from_str(&msg).unwrap();
+                let s : &Value = d.get("register").unwrap();
+                let email = s.get("email").unwrap().to_string().trim_matches('"').to_string();
+                let password = s.get("password").unwrap().to_string().trim_matches('"').to_string();
+                let full_name = s.get("name").unwrap().to_string().trim_matches('"').to_string();
+
+                println!("found json: {}, {}, {}",email, password, full_name );
+                self.authenticator.register_user(full_name, password, email, &mut ws_sender, &mut ws_receiver).await.unwrap();
+            }
             // we authenticate this dude first then hand it off to client.
         }
     }
@@ -134,7 +151,7 @@ async fn if_port_available(address : String, port: i32) -> bool {
     TcpListener::bind(format!("{}:{}", address, port)).await.is_err()
 }
 
-fn load_tls_identity() -> Result<NativeTlsAcceptor, Box<dyn std::error::Error>> {
+fn load_tls_identity() -> std::result::Result<NativeTlsAcceptor, Box<dyn std::error::Error>> {
     // Load the identity from a PKCS#12 archive
     let cert = include_bytes!("identity.pfx");
     let identity = Identity::from_pkcs12(cert, "Yahooconnect!1")?;
