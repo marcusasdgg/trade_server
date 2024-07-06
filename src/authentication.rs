@@ -26,6 +26,7 @@ pub struct Token {
     expire_date: DateTime<Utc>,
 }
 
+#[derive(Clone)]
 pub struct User {
     email: String,
     password: String,
@@ -34,7 +35,7 @@ pub struct User {
 }
 pub struct Authenticate {
     total_logins: i32,
-    user_data_base: Arc<Mutex<Vec<User>>>, //username and passwords.
+    user_data_base: Arc<Mutex<Vec<Mutex<User>>>>, //username and passwords.
     session_tokens: RwLock<HashMap<String, Token>>, //hashmap of session token -> user
     mailer: SmtpTransport,
     server_username: String,
@@ -116,7 +117,8 @@ impl Authenticate {
         let token = self.create_token(&mut new_user);
 
         let mut data_bas = self.user_data_base.lock().await;
-        data_bas.push(new_user);
+        let lock_user = Mutex::new(new_user);
+        data_bas.push(lock_user);
         drop(data_bas);
 
         ws_sender.send(Message::Text(format!("{{token: {{user: {}, token_id: {}, expire_date: {}}}}}", token.user, token.token_id, token.expire_date))).await.unwrap();
@@ -128,8 +130,22 @@ impl Authenticate {
     /*
     * logs in user and returns a token valid for 24 hours.
     */
-    pub fn login_user() -> std::result::Result<String,String> {
-        Ok("hash".to_string())
+    pub async fn login_user(&self, email: String, password: String, ws_sender: &mut SplitSink<WebSocketStream<TlsStream<TcpStream>>, Message>) -> std::result::Result<(),String> {
+        let lock = self.user_data_base.lock().await;
+        let mut result: Option<User> = None;
+        for user_lock in lock.iter(){
+            let userr = user_lock.lock().await;
+            if userr.get_user_id() == email && userr.get_pass_id() == password {
+                result = Some(userr.clone());
+            }
+        };  
+        if result.is_some() {
+            let token = self.create_token(&mut result.unwrap());
+            ws_sender.send(Message::Text(format!("{{token: {{user: {}, token_id: {}, expire_date: {}}}}}", token.user, token.token_id, token.expire_date))).await.unwrap();
+            Ok(())
+        } else {
+            return Err("authentication failed".to_string());
+        }
     }
 
     /*
@@ -182,5 +198,9 @@ impl User {
 
     pub fn get_user_id(&self) -> String {
         self.email.clone()
+    }
+
+    pub fn get_pass_id(&self) -> String {
+        self.password.clone()
     }
 }

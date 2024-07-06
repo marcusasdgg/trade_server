@@ -111,6 +111,7 @@ impl Dominator {
         println!("websocket found");
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         while let Some(msg) = ws_receiver.next().await {
+            //we capture this stream, once the user is authenticated we send stream to a client object to handle.
             let msg = msg.unwrap().into_text().unwrap();
             if msg.contains("register"){
                 println!("user trying to register");
@@ -121,8 +122,22 @@ impl Dominator {
                 let full_name = s.get("name").unwrap().to_string().trim_matches('"').to_string();
 
                 println!("found json: {}, {}, {}",email, password, full_name );
-                self.authenticator.register_user(full_name, password, email, &mut ws_sender, &mut ws_receiver).await.unwrap();
-            }
+                if self.authenticator.register_user(full_name, password, email, &mut ws_sender, &mut ws_receiver).await.is_ok(){
+                    break;
+                }
+            } else if msg.contains("login"){
+                println!("user trying to login");
+                let d: Value = serde_json::from_str(&msg).unwrap();
+                let s : &Value = d.get("login").unwrap();
+                let email = s.get("email").unwrap().to_string().trim_matches('"').to_string();
+                let password = s.get("password").unwrap().to_string().trim_matches('"').to_string();
+
+                if self.authenticator.login_user(email, password, &mut ws_sender).await.is_ok(){
+                    break;
+                } else {
+                    println!("authentication failed");
+                }
+            } 
             // we authenticate this dude first then hand it off to client.
         }
     }
