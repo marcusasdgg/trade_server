@@ -17,15 +17,19 @@ use serde_json::{Result, Value};
 
 mod client;
 mod authentication;
+use authentication::Token;
 use client::Client;
 
 pub struct Dominator {
-    clients: Arc<Mutex<Vec<Client>>>,
+    clients: Arc<Mutex<Vec<Arc<Client>>>>,
     server_address: String,
     client_host_port: i32,
     broadcast_address: String,
     authenticator: Arc<Authenticate>
     //atomic bool for shutdown sequence.
+    //saved_information struct with yahooo connected
+    // tradeApi
+    // trade_info API.
 }   
 
 impl Dominator {
@@ -104,9 +108,9 @@ impl Dominator {
     
     async fn handle_connection(&self,  stream: tokio_native_tls::TlsStream<tokio::net::TcpStream>){
         let peer_addr = stream.get_ref().get_ref().get_ref().peer_addr().unwrap();
-    
+        
         println!("address of client is {}", peer_addr);
-    
+        let mut logged_in: Option<Token> = None;
         let ws_stream = accept_async(stream).await.expect("Error during WebSocket handshake");
         println!("websocket found");
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
@@ -122,7 +126,11 @@ impl Dominator {
                 let full_name = s.get("name").unwrap().to_string().trim_matches('"').to_string();
 
                 println!("found json: {}, {}, {}",email, password, full_name );
-                if self.authenticator.register_user(full_name, password, email, &mut ws_sender, &mut ws_receiver).await.is_ok(){
+                let register = self.authenticator.register_user(full_name, password, email, &mut ws_sender, &mut ws_receiver).await;
+                if register.is_ok(){
+                    logged_in = Some(register.unwrap());
+                    break;
+                } else {
                     break;
                 }
             } else if msg.contains("login"){
@@ -132,13 +140,24 @@ impl Dominator {
                 let email = s.get("email").unwrap().to_string().trim_matches('"').to_string();
                 let password = s.get("password").unwrap().to_string().trim_matches('"').to_string();
 
-                if self.authenticator.login_user(email, password, &mut ws_sender).await.is_ok(){
+                let login = self.authenticator.login_user(email, password, &mut ws_sender).await;
+                if login.is_ok(){
+                    let logged_in = Some(login.unwrap());
                     break;
                 } else {
                     println!("authentication failed");
                 }
             } 
             // we authenticate this dude first then hand it off to client.
+        }
+
+        //write create new client function, consuming ws_sender otherwise drop it.
+        if logged_in.is_some() {
+            let client = Client::new(ws_sender, ws_receiver, self.authenticator.clone(), peer_addr, logged_in.unwrap().get_id());
+            self.clients.lock().unwrap().push(client.0);
+            client.1.await.unwrap();
+        } else {
+            return;
         }
     }
 

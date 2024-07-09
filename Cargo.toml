@@ -16,6 +16,6 @@ rand = "*"
 regex = "*"
 validator = "*"
 lettre = "0.11"
-chrono = "0.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+chrono = { version = "*", features = ["serde"] }
