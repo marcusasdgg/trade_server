@@ -3,7 +3,7 @@ use futures_util::{stream::SplitSink, SinkExt, StreamExt};
 use rand::{random, Rng};
 use regex::Regex;
 use tokio::net::TcpStream;
-use tokio_native_tls::TlsStream;
+use tokio_rustls::server::TlsStream;
 use tokio_tungstenite::WebSocketStream;
 use validator::{ValidateEmail, ValidationError};
 use tokio_tungstenite::tungstenite::protocol::Message;
@@ -107,34 +107,34 @@ impl Authenticate {
         let verification_code = rand::thread_rng().gen_range(0..999999);
 
 
-        // let mail = mailMessage::builder()
-        //     .from(format!("Trade Server <{}>",self.server_username.trim()).parse().unwrap())
-        //     .to(email.parse().unwrap())
-        //     .subject("Authentication Code For Trade Server")
-        //     .header(ContentType::TEXT_PLAIN)
-        //     .body(format!("Authentication code is {}",verification_code.clone()))
-        //     .unwrap();
+        let mail = mailMessage::builder()
+            .from(format!("Trade Server <{}>",self.server_username.trim()).parse().unwrap())
+            .to(email.parse().unwrap())
+            .subject("Authentication Code For Trade Server")
+            .header(ContentType::TEXT_PLAIN)
+            .body(format!("Authentication code is {}",verification_code.clone()))
+            .unwrap();
 
-        // self.mailer.send(&mail).unwrap();
+        self.mailer.send(&mail).unwrap();
         
-        // ws_sender.send(Message::text("{request: veri_code}")).await.unwrap(); //send a verification code request.
-        // let mut tries = 0;
-        // while let Some(msg) = ws_receiver.next().await {
-        //     if tries == 6 {
-        //         return Err("too many incorrect email verification tries".to_string());
-        //     }
-        //     let response = msg.unwrap().to_string();
-        //     if response.contains("auth") {
-        //         let response : Value = serde_json::from_str(&response).unwrap();
-        //         let given_code = response.get("auth").unwrap().as_i64().unwrap();
-        //         if  given_code == verification_code {
-        //             break;
-        //         } else {
-        //             ws_sender.send(Message::text("{request: bad_veri_code}")).await.unwrap();
-        //             tries += 1;
-        //         }
-        //     }
-        // }
+        ws_sender.send(Message::text("{request: veri_code}")).await.unwrap(); //send a verification code request.
+        let mut tries = 0;
+        while let Some(msg) = ws_receiver.next().await {
+            if tries == 6 {
+                return Err("too many incorrect email verification tries".to_string());
+            }
+            let response = msg.unwrap().to_string();
+            if response.contains("auth") {
+                let response : Value = serde_json::from_str(&response).unwrap();
+                let given_code = response.get("auth").unwrap().as_i64().unwrap();
+                if  given_code == verification_code {
+                    break;
+                } else {
+                    ws_sender.send(Message::text("{request: bad_veri_code}")).await.unwrap();
+                    tries += 1;
+                }
+            }
+        }
 
         //verification successful create user then create token.
         let mut new_user = User {email: email.clone(), password: password.clone(), name: full_name, active_tokens: Vec::new()};
@@ -189,6 +189,17 @@ impl Authenticate {
         Err("token not found".to_string())
     }
 
+    /**
+    * If token exists, return username.
+    */
+    pub async fn verify_user(&self, token_id: String) -> Option<String> {
+        if let Some(token) = self.session_tokens.lock().await.get(&token_id) {
+            return Some(token.get_user_id());
+        } else {
+            return None;
+        }
+    }
+
     pub async fn print_all_users(&self){
         let lock = self.user_data_base.lock().await;
         println!("all users: ");
@@ -201,7 +212,7 @@ impl Authenticate {
     async fn clear_expired_tokens(self: Arc<Self>){
         
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(100)).await;
+            tokio::time::sleep(tokio::time::Duration::from_secs(150)).await;
             let mut write_lock = self.session_tokens.lock().await;
         
             let expired_keys: Vec<String> = write_lock.iter()

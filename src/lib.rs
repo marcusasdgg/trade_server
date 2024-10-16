@@ -1,15 +1,18 @@
-use std::{net::{SocketAddr, UdpSocket}, option, sync::{Arc, Mutex}};
+use std::{fs::File, io::{self, BufReader, ErrorKind}, net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket}, option, path::Path, sync::{Arc, Mutex}};
 use authentication::Authenticate;
+
+
 use tokio::{net, sync::broadcast};
 use tokio::spawn;
 use tokio::time::Duration;
 use if_addrs::get_if_addrs;
 use tokio::net::{TcpListener, TcpStream};
-use tokio_native_tls::TlsAcceptor;
+use tokio_rustls::{rustls::{self, server::NoClientAuth, Certificate, PrivateKey}, TlsAcceptor};
 use tokio_tungstenite::accept_async;
 use tokio_tungstenite::tungstenite::protocol::Message;
-use native_tls::{Identity, TlsAcceptor as NativeTlsAcceptor};
 use futures_util::{StreamExt, SinkExt};
+use pki_types::{CertificateDer, PrivateKeyDer};
+use rustls_pemfile::{certs, private_key};
 
 
 use serde::Deserialize;
@@ -19,13 +22,21 @@ mod client;
 mod authentication;
 use authentication::Token;
 use client::Client;
+use watchlistmap::WatchListMap;
+
+mod watchlistmap;
 
 pub struct Dominator {
     clients: Arc<Mutex<Vec<Arc<Client>>>>,
     server_address: String,
     client_host_port: i32,
     broadcast_address: String,
-    authenticator: Arc<Authenticate>
+    authenticator: Arc<Authenticate>,
+    
+    watchlistMap: Arc<WatchListMap>, //set up stop losses
+    
+    //add a auxillary client loggedon list
+
     //atomic bool for shutdown sequence.
     //saved_information struct with yahooo connected
     // tradeApi
@@ -68,15 +79,17 @@ impl Dominator {
         let client_host_port = counter;
         
         let broadcast_message = broadcast_address.clone();
+        println!("broadcastAddress = {broadcast_address}:{client_host_port}");
 
         tokio::spawn(async move {
             Dominator::start_broadcast(format!("TS {}:{}",broadcast_message, client_host_port), argument2).await;
         });
 
         // now initializing all values has been done we can start the process of device assigning.
-        let new = Arc::new(Dominator {clients, server_address, client_host_port, broadcast_address, authenticator: Authenticate::new()});
+        let new = Arc::new(Dominator {clients, server_address, client_host_port, broadcast_address, authenticator: Authenticate::new(), watchlistMap: WatchListMap::new().await});
         
         let handler_new = new.clone();
+       
         tokio::spawn(async move {
            handler_new.connection_handler(client_host_port).await;
         });
@@ -89,9 +102,9 @@ impl Dominator {
     async fn connection_handler(self: Arc<Self>, port: i32) {
         // bind to broadcast address and port. we then establish
         let listener = TcpListener::bind(format!("{}:{}", self.broadcast_address , port)).await.unwrap();
-        let identity = load_tls_identity().expect("Failed to load TLS identity");
+        let identity = load_tls_identity("key.pem".to_string(),"cert.pem".to_string());
         
-        let acceptor = TlsAcceptor::from(identity);
+        let acceptor = TlsAcceptor::from(Arc::new(identity));
         //initate websocket oonnection
         while let Ok((stream, _)) = listener.accept().await {
             println!("found connection");
@@ -106,16 +119,15 @@ impl Dominator {
     }
 
     
-    async fn handle_connection(&self,  stream: tokio_native_tls::TlsStream<tokio::net::TcpStream>){
-        let peer_addr = stream.get_ref().get_ref().get_ref().peer_addr().unwrap();
-        
-        println!("address of client is {}", peer_addr);
+    async fn handle_connection(&self,  stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>){
+       
         let mut logged_in: Option<Token> = None;
         let ws_stream = accept_async(stream).await.expect("Error during WebSocket handshake");
         println!("websocket found");
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
         while let Some(msg) = ws_receiver.next().await {
             //we capture this stream, once the user is authenticated we send stream to a client object to handle.
+            //FOR FUTURE change the msg to a json serde object.
             let msg = msg.unwrap().into_text().unwrap();
             if msg.contains("register"){
                 println!("user trying to register");
@@ -153,7 +165,7 @@ impl Dominator {
 
         //write create new client function, consuming ws_sender otherwise drop it.
         if logged_in.is_some() {
-            let client = Client::new(ws_sender, ws_receiver, self.authenticator.clone(), peer_addr, logged_in.unwrap().get_id());
+            let client = Client::new(ws_sender, ws_receiver, self.authenticator.clone(), SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080), self.watchlistMap.clone());
             self.clients.lock().unwrap().push(client.0);
             client.1.await.unwrap();
         } else {
@@ -185,10 +197,33 @@ async fn if_port_available(address : String, port: i32) -> bool {
     TcpListener::bind(format!("{}:{}", address, port)).await.is_err()
 }
 
-fn load_tls_identity() -> std::result::Result<NativeTlsAcceptor, Box<dyn std::error::Error>> {
-    // Load the identity from a PKCS#12 archive
-    let cert = include_bytes!("identity.pfx");
-    let identity = Identity::from_pkcs12(cert, "Yahooconnect!1")?;
-    Ok(NativeTlsAcceptor::builder(identity).build()?)
+fn load_certificates(path: &str) -> Vec<Certificate> {
+    let file = File::open(path).unwrap();
+    let mut reader = BufReader::new(file);
+    
+    let mut cets: Vec<CertificateDer<'static>> = Vec::new();
+    cets = certs(&mut reader).map(|x| x.unwrap()).collect();
+    return cets.into_iter()
+    .map(|cert| Certificate(cert.as_ref().to_vec())) // Convert each CertificateDer to Certificate
+    .collect()
+
+}
+fn load_key(path: &Path) -> io::Result<PrivateKeyDer<'static>> {
+    Ok(private_key(&mut BufReader::new(File::open(path)?))
+        .unwrap()
+        .ok_or(io::Error::new(
+            ErrorKind::Other,
+            "no private key found".to_string(),
+        ))?)
 }
 
+
+fn load_tls_identity(key: String, cert: String) -> rustls::ServerConfig {   
+    // Load your certificate and key here.
+    // This is a placeholder; implement this function according to your needs.
+    let certsf = load_certificates(&cert);
+    let keys = load_key(Path::new(&key)).unwrap();
+    let properkey = PrivateKey(keys.secret_der().to_vec());
+    let config = rustls::ServerConfig::builder().with_safe_defaults().with_no_client_auth().with_single_cert(certsf,properkey).unwrap();
+    return config;
+}

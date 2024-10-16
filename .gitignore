@@ -1,3 +1,6 @@
 /target
 /src/identity.pfx
 .DS_Store
+key.pem
+cert.pem
+sds.cer
